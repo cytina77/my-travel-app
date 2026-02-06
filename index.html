@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>旅遊分帳 - 正式版 v41</title>
+    <!-- 引入所有必要的外部資源 -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Firebase 相容版 SDK (這在 HTML 單檔案部署最穩定) -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    
+    <!-- Lucide 圖標 -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
+        body { 
+            font-family: 'Noto Sans TC', sans-serif; 
+            -webkit-tap-highlight-color: transparent;
+            overscroll-behavior-y: contain;
+        }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        input, select { font-size: 16px !important; } /* 防止 iOS 自動放大 */
+    </style>
+</head>
+<body class="bg-slate-50">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // --- 1. Firebase 配置 (已填入您的專屬資訊) ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAXrK9th0TmDlVuyeQjF8y_II21x24IBhY",
+            authDomain: "my-travel-splitter.firebaseapp.com",
+            projectId: "my-travel-splitter",
+            storageBucket: "my-travel-splitter.firebasestorage.app",
+            messagingSenderId: "610664442521",
+            appId: "1:610664442521:web:aac6f099133bf14576e608",
+            measurementId: "G-RLP8MNM7W2"
+        };
+
+        // 初始化 Firebase 相容模式
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const auth = firebase.auth();
+        const db = firebase.firestore();
+        const appId = 'trip-pro-v41'; 
+
+        // --- 2. 輔助元件與設定 ---
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const iconRef = React.useRef(null);
+            useEffect(() => {
+                if (window.lucide && iconRef.current) {
+                    window.lucide.createIcons({
+                        attrs: { class: className, 'stroke-width': 2.5 },
+                        icons: { [name]: window.lucide.icons[name] }
+                    });
+                }
+            }, [name, className]);
+            return <i data-lucide={name} style={{width: size, height: size}} className={className}></i>;
+        };
+
+        const CURRENCIES = [
+            { code: 'TWD', symbol: '$', weight: 1 },
+            { code: 'AUD', symbol: '$', weight: 21.2 },
+            { code: 'JPY', symbol: '¥', weight: 0.21 },
+            { code: 'USD', symbol: '$', weight: 32.5 },
+            { code: 'HKD', symbol: '$', weight: 4.15 }
+        ];
+
+        const formatAmt = (num) => {
+            if (num === null || isNaN(num)) return "0";
+            return Number(Math.round(num * 100) / 100).toLocaleString(undefined, {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 1
+            });
+        };
+
+        // --- 3. 主要 App 元件 ---
+        function App() {
+            const [user, setUser] = useState(null);
+            const [groupId, setGroupId] = useState(null);
+            const [group, setGroup] = useState(null);
+            const [view, setView] = useState('loading'); // loading, setup, list, add, settle
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [copyStatus, setCopyStatus] = useState(false);
+
+            const [historyTrips, setHistoryTrips] = useState(() => {
+                try { return JSON.parse(localStorage.getItem('travel_history_v41') || '[]'); } catch { return []; }
+            });
+
+            // 登入邏輯
+            useEffect(() => {
+                auth.signInAnonymously().catch(err => console.error("Auth Error", err));
+                const unsubscribe = auth.onAuthStateChanged((u) => {
+                    setUser(u);
+                    if (u) {
+                        const id = new URLSearchParams(window.location.search).get('g');
+                        if (id) setGroupId(id); else setView('setup');
+                    }
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // 數據監聽
+            useEffect(() => {
+                if (!groupId || !user) return;
+                const groupRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('groups').doc(groupId);
+                const unsubscribe = groupRef.onSnapshot((snap) => {
+                    if (snap.exists) {
+                        const data = snap.data();
+                        setGroup(data);
+                        setHistoryTrips(prev => {
+                            const updated = [{ id: groupId, name: data.name, date: Date.now() }, ...prev.filter(t => t.id !== groupId)].slice(0, 10);
+                            localStorage.setItem('travel_history_v41', JSON.stringify(updated));
+                            return updated;
+                        });
+                        if (view === 'loading') setView('list');
+                    } else {
+                        handleExit();
+                    }
+                });
+                return () => unsubscribe();
+            }, [groupId, user]);
+
+            const handleExit = () => {
+                setGroupId(null); setGroup(null); setView('setup');
+                const url = new URL(window.location.href); url.searchParams.delete('g');
+                window.history.replaceState({}, '', url.pathname);
+            };
+
+            const stats = useMemo(() => {
+                const res = { total: 0, transfers: [], bals: {} };
+                if (!group || !group.members) return res;
+                group.members.forEach(m => res.bals[m.id] = 0);
+                (group.expenses || []).forEach(e => {
+                    const rate = parseFloat(e.rate) || 1;
+                    const amt = parseFloat(e.amount) * rate;
+                    res.total += amt;
+                    res.bals[e.payerId] += amt;
+                    e.involvedSplits?.forEach(s => {
+                        res.bals[s.memberId] -= (parseFloat(s.amount) * rate);
+                    });
+                });
+                const debtors = [], creditors = [];
+                Object.keys(res.bals).forEach(id => {
+                    const b = res.bals[id];
+                    if (b < -0.1) debtors.push({id, amt: Math.abs(b)});
+                    else if (b > 0.1) creditors.push({id, amt: b});
+                });
+                debtors.sort((a,b)=>b.amt-a.amt); creditors.sort((a,b)=>b.amt-a.amt);
+                while(debtors.length && creditors.length) {
+                    const d = debtors[0], c = creditors[0], flow = Math.min(d.amt, c.amt);
+                    res.transfers.push({from: d.id, to: c.id, amount: flow});
+                    d.amt -= flow; c.amt -= flow;
+                    if(d.amt < 0.1) debtors.shift(); if(c.amt < 0.1) creditors.shift();
+                }
+                return res;
+            }, [group]);
+
+            if (view === 'loading') return <div className="h-screen flex items-center justify-center text-indigo-600 font-bold animate-pulse text-lg">正在連線資料庫...</div>;
+
+            if (!groupId || !group) return (
+                <div className="max-w-md mx-auto min-h-screen bg-white p-6 flex flex-col animate-in fade-in duration-500">
+                    <div className="text-center py-12">
+                        <div className="w-20 h-20 bg-indigo-600 rounded-[2rem] mx-auto mb-6 flex items-center justify-center text-white shadow-xl rotate-3">
+                            <Icon name="Wallet" size={40} />
+                        </div>
+                        <h1 className="text-4xl font-black tracking-tighter text-slate-800">旅遊分帳</h1>
+                        <p className="text-indigo-500 font-bold text-xs mt-3 uppercase tracking-[0.3em]">正式版 v41 • 即時對帳</p>
+                    </div>
+
+                    <div className="space-y-8 flex-1">
+                        {historyTrips.length > 0 && (
+                            <div className="space-y-3">
+                                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">最近行程紀錄</p>
+                                {historyTrips.map(t => (
+                                    <button key={t.id} onClick={() => setGroupId(t.id)} className="w-full p-4.5 bg-slate-50 border border-slate-100 rounded-2xl flex justify-between items-center text-left active:scale-95 transition-all">
+                                        <div className="flex items-center gap-3 overflow-hidden">
+                                            <Icon name="MapPin" size={18} className="text-indigo-500 flex-shrink-0" />
+                                            <span className="font-bold text-slate-700 truncate">{t.name}</span>
+                                        </div>
+                                        <Icon name="ChevronRight" size={18} className="text-slate-300" />
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+
+                        <div className="space-y-4">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">開啟新冒險</p>
+                            <SetupForm onDone={(n, m) => {
+                                const newId = Math.random().toString(36).substring(2, 10);
+                                db.collection('artifacts').doc(appId).collection('public').doc('data').collection('groups').doc(newId).set({
+                                    id: newId, name: n, baseCurrency: 'TWD', expenses: [],
+                                    members: m.map(name => ({ id: Math.random().toString(36).substring(2, 12), name })),
+                                    createdAt: Date.now()
+                                }).then(() => setGroupId(newId));
+                            }} />
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen bg-slate-50 flex flex-col relative overflow-hidden">
+                    <header className="p-4 bg-white border-b border-slate-100 flex justify-between items-center sticky top-0 z-50 shadow-sm">
+                        <button onClick={handleExit} className="p-2 bg-slate-50 rounded-full text-slate-400 active:scale-90"><Icon name="ArrowLeft" size={20}/></button>
+                        <div className="text-center flex-1 overflow-hidden mx-2">
+                            <h2 className="font-black text-indigo-600 leading-none truncate">旅遊分帳</h2>
+                            <p className="text-[10px] text-slate-400 font-bold mt-1 uppercase truncate opacity-70">{group.name}</p>
+                        </div>
+                        <button onClick={() => {
+                            const url = window.location.origin + window.location.pathname + '?g=' + groupId;
+                            navigator.clipboard.writeText(url);
+                            setCopyStatus(true); setTimeout(()=>setCopyStatus(false), 2000);
+                        }} className="p-2.5 bg-indigo-600 text-white rounded-full shadow-md active:scale-90 transition-all">
+                            <Icon name={copyStatus ? "Check" : "Share2"} size={18} />
+                        </button>
+                    </header>
+
+                    <main className="flex-1 overflow-y-auto p-4 pb-32">
+                        {view === 'list' && (
+                            <div className="space-y-5 animate-in fade-in duration-300">
+                                <div className="bg-indigo-600 p-8 rounded-[2.5rem] text-white shadow-2xl text-center relative overflow-hidden">
+                                    <div className="absolute top-0 left-0 w-full h-full bg-white/5 pointer-events-none"></div>
+                                    <p className="text-white/60 text-[10px] font-black uppercase tracking-widest mb-2">本次旅行總支出 ({group.baseCurrency})</p>
+                                    <h2 className="text-4xl font-black tabular-nums tracking-tighter">$ {stats.total.toLocaleString()}</h2>
+                                    <div className="mt-4 flex flex-wrap justify-center gap-1.5 opacity-80">
+                                        {group.members.map(m => <span key={m.id} className="px-2 py-0.5 bg-white/10 rounded-full text-[9px] font-bold border border-white/5">{m.name}</span>)}
+                                    </div>
+                                </div>
+                                <div className="space-y-2.5">
+                                    {group.expenses.length === 0 ? (
+                                        <div className="text-center py-24 text-slate-300">
+                                            <Icon name="Receipt" size={60} className="mx-auto mb-4 opacity-20" />
+                                            <p className="font-black text-sm uppercase tracking-widest">目前尚無帳目</p>
+                                        </div>
+                                    ) : (
+                                        group.expenses.slice().sort((a,b)=>b.createdAt - a.createdAt).map(e => (
+                                            <div key={e.id} className="bg-white p-5 rounded-2xl flex justify-between items-center shadow-sm border border-white active:scale-[0.98] transition-all">
+                                                <div className="overflow-hidden mr-4">
+                                                    <p className="font-black text-slate-700 text-lg truncate">{e.title}</p>
+                                                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wide mt-0.5">{e.date} • {group.members.find(m=>m.id===e.payerId)?.name} 付款</p>
+                                                </div>
+                                                <div className="text-right flex-shrink-0">
+                                                    <p className="font-black text-2xl text-indigo-600 tabular-nums leading-none">${parseFloat(e.amount).toLocaleString()}</p>
+                                                    {e.currency !== group.baseCurrency && <p className="text-[9px] text-rose-400 font-black mt-1 uppercase tracking-tighter">≈ {group.baseCurrency} {formatAmt(e.amount * e.rate)}</p>}
+                                                </div>
+                                            </div>
+                                        ))
+                                    }
+                                </div>
+                            </div>
+                        )}
+
+                        {view === 'settle' && (
+                            <div className="space-y-6 animate-in fade-in duration-300">
+                                <h3 className="text-2xl font-black text-slate-800 px-1">結算分析</h3>
+                                <div className="bg-white p-7 rounded-[2.5rem] shadow-sm space-y-6">
+                                    <div className="flex items-center gap-2 text-[10px] font-black text-indigo-400 uppercase tracking-widest px-1">
+                                        <Icon name="ArrowRightLeft" size={14} /> 最佳化還錢路徑
+                                    </div>
+                                    {stats.transfers.length === 0 ? <p className="text-center text-slate-300 font-bold py-10">帳目已平，不需要轉帳！</p> : 
+                                        stats.transfers.map((t, i) => (
+                                            <div key={i} className="p-5 bg-slate-50 rounded-3xl border border-slate-100 flex flex-col gap-3">
+                                                <div className="flex justify-between items-center px-1">
+                                                    <span className="text-rose-500 font-black text-xl truncate flex-1 min-w-0">{group.members.find(m=>m.id===t.from).name}</span>
+                                                    <Icon name="ArrowRight" size={20} className="mx-4 text-slate-300"/>
+                                                    <span className="text-emerald-500 font-black text-xl truncate flex-1 min-w-0 text-right">{group.members.find(m=>m.id===t.to).name}</span>
+                                                </div>
+                                                <div className="bg-white py-3 rounded-2xl text-center shadow-inner">
+                                                    <span className="text-2xl font-black text-indigo-600 tabular-nums">{group.baseCurrency} {formatAmt(t.amount)}</span>
+                                                </div>
+                                            </div>
+                                        ))
+                                    }
+                                </div>
+                            </div>
+                        )}
+
+                        {view === 'add' && (
+                            <div className="space-y-5 animate-in slide-in-from-bottom duration-300">
+                                <div className="flex justify-between items-center px-1">
+                                    <h2 className="text-2xl font-black text-slate-800">新增支出</h2>
+                                    <button onClick={()=>setView('list')} className="p-2 bg-white rounded-full text-slate-300 shadow-sm"><Icon name="X" size={20}/></button>
+                                </div>
+                                <AddForm group={group} onSave={(data) => {
+                                    setIsSubmitting(true);
+                                    const groupRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('groups').doc(groupId);
+                                    const newExp = { ...data, id: Math.random().toString(36).substring(2, 12), createdAt: Date.now() };
+                                    groupRef.update({
+                                        expenses: firebase.firestore.FieldValue.arrayUnion(newExp)
+                                    }).then(() => {
+                                        setView('list'); setIsSubmitting(false);
+                                    });
+                                }} isSubmitting={isSubmitting} />
+                            </div>
+                        )}
+                    </main>
+
+                    <nav className="fixed bottom-0 inset-x-0 max-w-md mx-auto bg-white/90 backdrop-blur-md border-t border-slate-100 p-4 flex justify-around items-center rounded-t-[2.5rem] shadow-lg z-50">
+                        <button onClick={()=>setView('list')} className={`flex flex-col items-center gap-1 transition-all ${view==='list'?'text-indigo-600 scale-110 font-black':'text-slate-300'}`}>
+                            <Icon name="Receipt" size={24} />
+                            <span className="text-[9px] uppercase tracking-tighter">明細</span>
+                        </button>
+                        <button onClick={()=>setView('add')} className="w-14 h-14 bg-rose-500 text-white rounded-2xl flex items-center justify-center -mt-12 shadow-xl shadow-rose-200 active:scale-90 transition-all border-[6px] border-slate-50">
+                            <Icon name="Plus" size={32} />
+                        </button>
+                        <button onClick={()=>setView('settle')} className={`flex flex-col items-center gap-1 transition-all ${view==='settle'?'text-indigo-600 scale-110 font-black':'text-slate-300'}`}>
+                            <Icon name="Calculator" size={24} />
+                            <span className="text-[9px] uppercase tracking-tighter">結算</span>
+                        </button>
+                    </nav>
+                </div>
+            );
+        }
+
+        function SetupForm({ onDone }) {
+            const [name, setName] = useState('');
+            const [members, setMembers] = useState([]);
+            const [input, setInput] = useState('');
+            return (
+                <div className="space-y-4">
+                    <input className="w-full p-4.5 bg-slate-50 border-2 border-transparent focus:border-indigo-500 rounded-2xl font-bold outline-none transition-all placeholder:text-slate-300 placeholder:text-sm truncate" placeholder="旅行標題 (例如: 日本五日遊)" value={name} onChange={e=>setName(e.target.value)} />
+                    <div className="flex gap-2">
+                        <input className="flex-1 min-w-0 p-4.5 bg-slate-50 border-2 border-transparent focus:border-indigo-500 rounded-2xl font-bold outline-none transition-all placeholder:text-slate-300 placeholder:text-sm truncate" placeholder="輸入旅伴名字" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==='Enter' && (input.trim() && setMembers([...members, input.trim()]), setInput(''))} />
+                        <button onClick={()=>{if(input.trim()){setMembers([...members, input.trim()]); setInput('');}}} className="w-14 h-14 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg flex-shrink-0 active:scale-90 transition-all"><Icon name="Plus" size={24} /></button>
+                    </div>
+                    <div className="flex flex-wrap gap-2 min-h-[30px]">{members.map((m,i)=><span key={i} className="px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-full font-black text-[11px] border border-indigo-100 flex items-center gap-2">{m} <X size={12} className="cursor-pointer opacity-50" onClick={()=>setMembers(members.filter((_,idx)=>idx!==i))}/></span>)}</div>
+                    <button onClick={()=>onDone(name, members)} disabled={!name || members.length < 2} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black text-xl shadow-xl shadow-indigo-100 disabled:bg-slate-100 disabled:text-slate-300 transition-all active:scale-[0.98]">建立行程活動</button>
+                </div>
+            );
+        }
+
+        function AddForm({ group, onSave, isSubmitting }) {
+            const [f, setF] = useState({ title: '', amount: '', category: '飲食', date: new Date().toISOString().split('T')[0], currency: 'TWD', rate: 1, payerId: group.members[0].id });
+            
+            const updateCurrency = (code) => {
+                const target = CURRENCIES.find(c => c.code === code);
+                const base = CURRENCIES.find(c => c.code === group.baseCurrency);
+                const newRate = Math.round((target.weight / base.weight) * 1000) / 1000;
+                setF({...f, currency: code, rate: newRate});
+            };
+
+            return (
+                <div className="space-y-4">
+                    <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">消費標題</label>
+                        <input className="w-full p-4 bg-white border border-slate-200 rounded-2xl font-bold text-lg shadow-sm focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="買了什麼？" value={f.title} onChange={e=>setF({...f, title: e.target.value})} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">日期</label>
+                            <input type="date" className="w-full p-4 bg-white border border-slate-200 rounded-2xl text-xs font-bold shadow-sm" value={f.date} onChange={e=>setF({...f, date: e.target.value})} />
+                        </div>
+                        <div className="space-y-1.5">
+                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">幣別</label>
+                            <select className="w-full p-4 bg-white border border-slate-200 rounded-2xl font-black text-base shadow-sm" value={f.currency} onChange={e=>updateCurrency(e.target.value)}>{CURRENCIES.map(c=><option key={c.code} value={c.code}>{c.code}</option>)}</select>
+                        </div>
+                    </div>
+                    <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">金額與匯率</label>
+                        <input type="number" className="w-full p-5 bg-white border border-slate-200 rounded-2xl font-black text-3xl text-right shadow-inner outline-none focus:border-indigo-500" placeholder="0" value={f.amount} onChange={e=>setF({...f, amount: e.target.value})} />
+                        {f.currency !== group.baseCurrency && (
+                            <div className="flex items-center justify-between p-3 bg-indigo-50/50 rounded-xl border border-indigo-100 mt-2">
+                                <span className="text-[10px] font-black text-indigo-400 uppercase">即時匯率 1{f.currency} =</span>
+                                <div className="flex items-center gap-2">
+                                    <input type="number" step="0.001" className="w-20 bg-transparent text-right font-black text-indigo-600 outline-none" value={f.rate} onChange={e=>setF({...f, rate: parseFloat(e.target.value)||0})} />
+                                    <span className="text-[10px] font-black text-indigo-400">{group.baseCurrency}</span>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="p-5 bg-white rounded-3xl border border-slate-100 space-y-4 shadow-sm">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">誰付錢的？</label>
+                        <div className="flex gap-2.5 overflow-x-auto scrollbar-hide py-1">
+                            {group.members.map(m=>(
+                                <button key={m.id} onClick={()=>setF({...f, payerId: m.id})} className={`px-6 py-3 rounded-2xl whitespace-nowrap font-black text-sm border-2 transition-all ${f.payerId===m.id?'bg-indigo-600 text-white border-indigo-600 shadow-md':'bg-white text-slate-300 border-slate-50'}`}>{m.name}</button>
+                            ))}
+                        </div>
+                    </div>
+                    <button onClick={()=>{
+                        const perAmt = parseFloat(f.amount) / group.members.length;
+                        onSave({...f, involvedSplits: group.members.map(m=>({memberId: m.id, amount: perAmt}))});
+                    }} disabled={!f.title || !f.amount || isSubmitting} className="w-full py-6 bg-indigo-600 text-white rounded-[2rem] font-black text-2xl shadow-xl shadow-indigo-100 active:scale-95 disabled:bg-slate-100 transition-all flex items-center justify-center gap-3">
+                        {isSubmitting ? <Icon name="Loader2" className="animate-spin" /> : <Icon name="Check" size={28} />} 儲存開銷紀錄
+                    </button>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+
